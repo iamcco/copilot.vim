@@ -50,14 +50,31 @@ function! s:Event(type) abort
   endtry
 endfunction
 
+" check if file size greater than copilot_max_file_size
+function! s:start_action(type) abort
+  let l:disabled = get(b:, 'copilot_max_file_size_disabled', -1)
+  if l:disabled == 1
+    return
+  endif
+  if l:disabled == -1
+    if getfsize(expand('<afile>')) > get(g:, 'copilot_max_file_size', 1024*1024)
+      let b:copilot_max_file_size_disabled = 1
+      return
+    else
+      let b:copilot_max_file_size_disabled = 0
+    endif
+  endif
+  call s:Event(a:type)
+endfunction
+
 augroup github_copilot
   autocmd!
-  autocmd InsertLeave          * call s:Event('InsertLeave')
-  autocmd BufLeave             * if mode() =~# '^[iR]'|call s:Event('InsertLeave')|endif
-  autocmd InsertEnter          * call s:Event('InsertEnter')
-  autocmd BufEnter             * if mode() =~# '^[iR]'|call s:Event('InsertEnter')|endif
-  autocmd CursorMovedI         * call s:Event('CursorMovedI')
-  autocmd CompleteChanged      * call s:Event('CompleteChanged')
+  autocmd InsertLeave          * call s:start_action('InsertLeave')
+  autocmd BufLeave             * if mode() =~# '^[iR]'|call s:start_action('InsertLeave')|endif
+  autocmd InsertEnter          * call s:start_action('InsertEnter')
+  autocmd BufEnter             * if mode() =~# '^[iR]'|call s:start_action('InsertEnter')|endif
+  autocmd CursorMovedI         * call s:start_action('CursorMovedI')
+  autocmd CompleteChanged      * call s:start_action('CompleteChanged')
   autocmd ColorScheme,VimEnter * call s:ColorScheme()
   autocmd VimEnter             * call s:MapTab()
   autocmd BufReadCmd copilot://* setlocal buftype=nofile bufhidden=wipe nobuflisted readonly nomodifiable

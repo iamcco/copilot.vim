@@ -90,6 +90,10 @@ g:copilot_proxy_strict_ssl
 >
                         let g:copilot_proxy_strict_ssl = v:false
 <
+                                                *b:copilot_max_file_size*
+b:copilot_max_file_size Set max file size in bytes for which GitHub Copilot
+                        will be enabled.  Default is 1MB.
+
 MAPS                                            *copilot-maps*
 
                                                 *copilot-i_<Tab>*
