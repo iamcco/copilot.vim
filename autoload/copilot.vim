@@ -88,6 +88,18 @@ function! copilot#RunningAgent() abort
   endif
 endfunction
 
+function! s:NodeVersionWarning() abort
+  if exists('s:agent.node_version') && s:agent.node_version =~# '^16\.'
+    echohl WarningMsg
+    echo "Warning: Node.js 16 is approaching end of life and support will be dropped in a future release of copilot.vim."
+    echohl NONE
+  elseif exists('s:agent.node_version_warning')
+    echohl WarningMsg
+    echo 'Warning:' s:agent.node_version_warning
+    echohl NONE
+  endif
+endfunction
+
 function! copilot#Request(method, params, ...) abort
   let agent = copilot#Agent()
   return call(agent.Request, [a:method, a:params] + a:000)
@@ -121,11 +133,15 @@ function! copilot#Clear() abort
 endfunction
 
 function! s:Reject(bufnr) abort
-  let uuid = getbufvar(a:bufnr, '_copilot_uuid')
-  if !empty(uuid)
-    call setbufvar(a:bufnr, '_copilot_uuid', '')
-    call copilot#Request('notifyRejected', {'uuids': [uuid]})
-  endif
+  try
+    let dict = getbufvar(a:bufnr, '_copilot')
+    if type(dict) == v:t_dict && !empty(get(dict, 'shown_choices', {}))
+      call copilot#Request('notifyRejected', {'uuids': keys(dict.shown_choices)})
+      let dict.shown_choices = {}
+    endif
+  catch
+    call copilot#logger#Exception()
+  endtry
 endfunction
 
 function! copilot#Dismiss() abort
@@ -350,9 +366,8 @@ function! s:UpdatePreview() abort
         call prop_add(line('.'), col('$'), {'type': s:annot_hlgroup, 'text': ' ' . annot})
       endif
     endif
-    if uuid !=# get(b:, '_copilot_uuid', '')
-      call s:Reject('%')
-      let b:_copilot_uuid = uuid
+    if !has_key(b:_copilot.shown_choices, uuid)
+      let b:_copilot.shown_choices[uuid] = v:true
       call copilot#Request('notifyShown', {'uuid': uuid})
     endif
   catch
@@ -366,6 +381,7 @@ function! s:HandleTriggerResult(result) abort
   endif
   let b:_copilot.suggestions = get(a:result, 'completions', [])
   let b:_copilot.choice = 0
+  let b:_copilot.shown_choices = {}
   call s:UpdatePreview()
 endfunction
 
@@ -391,11 +407,10 @@ function! copilot#IsMapped() abort
   return get(g:, 'copilot_assume_mapped') ||
         \ hasmapto('copilot#Accept(', 'i')
 endfunction
-let s:is_mapped = copilot#IsMapped()
 
 function! copilot#Schedule(...) abort
   call copilot#Clear()
-  if !s:is_mapped || !s:has_ghost_text || !copilot#Enabled()
+  if !s:has_ghost_text || !copilot#Enabled() || !copilot#IsMapped()
     return
   endif
   let delay = a:0 ? a:1 : get(g:, 'copilot_idle_delay', 75)
@@ -441,7 +456,6 @@ function! copilot#Accept(...) abort
   let s = copilot#GetDisplayedSuggestion()
   if !empty(s.text)
     unlet! b:_copilot
-    let b:_copilot_uuid = ''
     call copilot#Request('notifyAccepted', {'uuid': s.uuid})
     call s:ClearPreview()
     let s:suggestion_text = s.text
@@ -565,6 +579,7 @@ function! s:commands.status(opts) abort
   endif
 
   echo 'Copilot: Enabled and online'
+  call s:NodeVersionWarning()
 endfunction
 
 function! s:commands.signout(opts) abort
@@ -659,6 +674,7 @@ function! s:commands.version(opts) abort
   if exists('s:agent.node_version')
     echo 'dist/agent.js ' . s:agent.Call('getVersion', {}).version
     echo 'Node.js ' . s:agent.node_version
+    call s:NodeVersionWarning()
   else
     echo 'dist/agent.js not running'
   endif
@@ -730,7 +746,7 @@ function! copilot#Command(line1, line2, range, bang, mods, arg) abort
   try
     let err = copilot#Agent().StartupError()
     if !empty(err)
-      return 'echo ' . string('Copilot: ' . string(err))
+      return 'echo ' . string('Copilot: ' . err)
     endif
     try
       let opts = copilot#Call('checkStatus', {'options': {'localChecksOnly': v:true}})
