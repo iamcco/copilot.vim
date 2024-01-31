@@ -1,8 +1,3 @@
-if exists('g:autoloaded_copilot')
-  finish
-endif
-let g:autoloaded_copilot = 1
-
 scriptencoding utf-8
 
 let s:has_nvim_ghost_text = has('nvim-0.6') && exists('*nvim_buf_get_mark')
@@ -60,10 +55,11 @@ function! s:Start() abort
   if s:Running()
     return
   endif
-  let s:agent = copilot#agent#New({'notifications': {
+  let s:agent = copilot#agent#New({'methods': {
         \ 'statusNotification': function('s:StatusNotification'),
         \ 'PanelSolution': function('copilot#panel#Solution'),
         \ 'PanelSolutionsDone': function('copilot#panel#SolutionsDone'),
+        \ 'copilot/openURL': function('s:OpenURL'),
         \ },
         \ 'editorConfiguration' : s:EditorConfiguration()})
 endfunction
@@ -173,8 +169,11 @@ function! s:BufferDisabled() abort
     return empty(b:copilot_enabled) ? 4 : 0
   endif
   let short = empty(&l:filetype) ? '.' : split(&l:filetype, '\.', 1)[0]
-  let config = get(g:, 'copilot_filetypes', {})
-  if type(config) == v:t_dict && has_key(config, &l:filetype)
+  let config = {}
+  if type(get(g:, 'copilot_filetypes')) == v:t_dict
+    let config = g:copilot_filetypes
+  endif
+  if has_key(config, &l:filetype)
     return empty(config[&l:filetype])
   elseif has_key(config, short)
     return empty(config[short])
@@ -344,7 +343,7 @@ function! s:UpdatePreview() abort
     call s:ClearPreview()
     if s:has_nvim_ghost_text
       let data = {'id': 1}
-      let data.virt_text_win_col = virtcol('.') - 1
+      let data.virt_text_pos = 'overlay'
       let append = strpart(getline('.'), col('.') - 1 + delete)
       let data.virt_text = [[text[0] . append . repeat(' ', delete - len(text[0])), s:hlgroup]]
       if len(text) > 1
@@ -396,10 +395,10 @@ endfunction
 
 function! s:Trigger(bufnr, timer) abort
   let timer = get(g:, '_copilot_timer', -1)
-  unlet! g:_copilot_timer
   if a:bufnr !=# bufnr('') || a:timer isnot# timer || mode() !=# 'i'
     return
   endif
+  unlet! g:_copilot_timer
   return copilot#Suggest()
 endfunction
 
@@ -409,11 +408,13 @@ function! copilot#IsMapped() abort
 endfunction
 
 function! copilot#Schedule(...) abort
-  call copilot#Clear()
   if !s:has_ghost_text || !copilot#Enabled() || !copilot#IsMapped()
+    call copilot#Clear()
     return
   endif
-  let delay = a:0 ? a:1 : get(g:, 'copilot_idle_delay', 75)
+  call s:UpdatePreview()
+  let delay = a:0 ? a:1 : get(g:, 'copilot_idle_delay', 15)
+  call timer_stop(get(g:, '_copilot_timer', -1))
   let g:_copilot_timer = timer_start(delay, function('s:Trigger', [bufnr('')]))
 endfunction
 
@@ -456,11 +457,18 @@ function! copilot#Accept(...) abort
   let s = copilot#GetDisplayedSuggestion()
   if !empty(s.text)
     unlet! b:_copilot
-    call copilot#Request('notifyAccepted', {'uuid': s.uuid})
+    let text = ''
+    if a:0 > 1
+      let text = substitute(matchstr(s.text, "\n*" . '\%(' . a:2 .'\)'), "\n*$", '', '')
+    endif
+    if empty(text)
+      let text = s.text
+    endif
+    call copilot#Request('notifyAccepted', {'uuid': s.uuid, 'acceptedLength': copilot#doc#UTF16Width(text)})
     call s:ClearPreview()
-    let s:suggestion_text = s.text
+    let s:suggestion_text = text
     return repeat("\<Left>\<Del>", s.outdentSize) . repeat("\<Del>", s.deleteSize) .
-            \ "\<C-R>\<C-O>=copilot#TextQueuedForInsertion()\<CR>\<End>"
+            \ "\<C-R>\<C-O>=copilot#TextQueuedForInsertion()\<CR>" . (a:0 > 1 ? '' : "\<End>")
   endif
   let default = get(g:, 'copilot_tab_fallback', pumvisible() ? "\<C-N>" : "\t")
   if !a:0
@@ -478,24 +486,54 @@ function! copilot#Accept(...) abort
   endif
 endfunction
 
+function! copilot#AcceptWord(...) abort
+  return copilot#Accept(a:0 ? a:1 : '', '\%(\k\@!.\)*\k*')
+endfunction
+
+function! copilot#AcceptLine(...) abort
+  return copilot#Accept(a:0 ? a:1 : "\r", "[^\n]\\+")
+endfunction
+
 function! s:BrowserCallback(into, code) abort
   let a:into.code = a:code
 endfunction
 
 function! copilot#Browser() abort
   if type(get(g:, 'copilot_browser')) == v:t_list
-    return copy(g:copilot_browser)
-  elseif has('win32') && executable('rundll32')
-    return ['rundll32', 'url.dll,FileProtocolHandler']
-  elseif isdirectory('/private') && executable('/usr/bin/open')
-    return ['/usr/bin/open']
-  elseif executable('gio')
-    return ['gio', 'open']
+    let cmd = copy(g:copilot_browser)
+  elseif type(get(g:, 'open_command')) == v:t_list
+    let cmd = copy(g:open_command)
+  elseif has('win32')
+    let cmd = ['rundll32', 'url.dll,FileProtocolHandler']
+  elseif has('mac')
+    let cmd = ['open']
+  elseif executable('wslview')
+    return ['wslview']
   elseif executable('xdg-open')
     return ['xdg-open']
   else
     return []
   endif
+  if executable(get(cmd, 0, ''))
+    return cmd
+  else
+    return []
+  endif
+endfunction
+
+function! s:OpenURL(params) abort
+  echo a:params.target
+  let browser = copilot#Browser()
+  if empty(browser)
+    return v:false
+  endif
+  let status = {}
+  call copilot#job#Stream(browser + [a:params.target], v:null, v:null, function('s:BrowserCallback', [status]))
+  let time = reltime()
+  while empty(status) && reltimefloat(reltime(time)) < 1
+    sleep 10m
+  endwhile
+  return get(status, 'code') ? v:false : v:true
 endfunction
 
 let s:commands = {}
@@ -603,7 +641,7 @@ function! s:commands.setup(opts) abort
 
   let status = copilot#Call('checkStatus', {})
   if has_key(status, 'user')
-    let data = {}
+    let data = {'status': 'AlreadySignedIn', 'user': status.user}
   else
     let data = copilot#Call('signInInitiate', {})
   endif
@@ -654,6 +692,8 @@ function! s:commands.setup(opts) abort
     else
       let status = request.result
     endif
+  elseif get(data, 'status', '') isnot# 'AlreadySignedIn'
+    return 'echoerr ' . string('Copilot: Something went wrong')
   endif
 
   let user = get(status, 'user', '<unknown>')
@@ -671,9 +711,10 @@ function! s:commands.version(opts) abort
   let info = copilot#agent#EditorInfo()
   echo 'copilot.vim ' .info.editorPluginInfo.version
   echo info.editorInfo.name . ' ' . info.editorInfo.version
-  if exists('s:agent.node_version')
-    echo 'dist/agent.js ' . s:agent.Call('getVersion', {}).version
-    echo 'Node.js ' . s:agent.node_version
+  if s:Running()
+    let versions = s:agent.Call('getVersion', {})
+    echo 'dist/agent.js ' . versions.version
+    echo 'Node.js ' . get(s:agent, 'node_version', substitute(get(versions, 'runtimeVersion', '?'), '^node/', '', 'g'))
     call s:NodeVersionWarning()
   else
     echo 'dist/agent.js not running'
